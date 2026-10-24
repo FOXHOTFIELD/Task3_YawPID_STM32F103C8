@@ -576,8 +576,22 @@ void ctl_step(void)
             out = 0.0f;
         }
 
-        if (out > (float)s_out_max) { out = (float)s_out_max; }
-        if (out < -(float)s_out_max) { out = -(float)s_out_max; }
+        /* 制动增强（见 board_config）：
+           只有"误差与速度反号"才是被外力推离目标，这时全力抵抗；
+           朝目标收敛时（同号）保持正常限幅——那一阶段该由 Kd 做阻尼，
+           再放大只会刹过头反向冲出去（实测过：反向超调 14°）。 */
+        if ((util_absf(s_fb_rate) > BRAKE_RATE_DPS) &&
+            ((s_error * s_fb_rate) < 0.0f))
+        {
+            out *= (float)BRAKE_BOOST_NUM;
+            if (out > (float)OUTPUT_BRAKE_PM) { out = (float)OUTPUT_BRAKE_PM; }
+            if (out < -(float)OUTPUT_BRAKE_PM) { out = -(float)OUTPUT_BRAKE_PM; }
+        }
+        else
+        {
+            if (out > (float)s_out_max) { out = (float)s_out_max; }
+            if (out < -(float)s_out_max) { out = -(float)s_out_max; }
+        }
         s_out_pm = (int16_t)out;
 
         /* 输出小到推不动电机时改成短路刹车：
