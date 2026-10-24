@@ -1,0 +1,38 @@
+# ===== Keil MDK 编译产物（不入库）=====
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+MDK-ARM/*.dep
+MDK-ARM/*.lnp
+MDK-ARM/*.sct
+MDK-ARM/*.htm
+MDK-ARM/*.build_log.htm
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvoptx
+MDK-ARM/*.uvguix*
+MDK-ARM/build.log
+
+# ===== 编译输出 / 中间文件 =====
+*.axf
+*.hex
+*.bin
+*.elf
+*.map
+*.o
+*.d
+*.crf
+*.lst
+*.obj
+*.i
+*.sbr
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.bak
+*.tmp
+*.log
+
+# 注意：Drivers/（HAL 与 CMSIS）必须入库，
+# 否则别人 clone 下来无法编译；它不属于编译产物。
