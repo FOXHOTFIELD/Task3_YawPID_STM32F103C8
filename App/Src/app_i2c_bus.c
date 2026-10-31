@@ -38,11 +38,59 @@ HAL_StatusTypeDef i2c_bus_read_dma(uint8_t addr7, uint8_t reg, uint8_t *data, ui
                                 I2C_MEMADD_SIZE_8BIT, data, len);
 }
 
+/* 位操作恢复用的短延时：400kHz 时半周期 1.25us，这里给足余量，
+   恢复过程本来就不要求速度（只在 IMU 掉线重连时走一次）。 */
+static void hw_recover_delay(void)
+{
+    volatile uint32_t i;
+
+    for (i = 0U; i < 120U; i++)
+    {
+        __NOP();
+    }
+}
+
 void i2c_bus_recover(void)
 {
-    /* 硬件 I2C 的恢复：反初始化再初始化，重新产生 400kHz 时序；
-       若从机把 SDA 拉死，先补 9 个 SCL 时钟（见下方软件实现里的同名逻辑） */
+    GPIO_InitTypeDef g;
+    uint8_t i;
+
+    /* 1) 先把引脚从 I2C 外设手里收回来，切成开漏 GPIO 自己发时钟。
+          从机若停在半个字节里（或把 SDA 拉死），它必须看到 SCL 才会把
+          移位寄存器走完并释放 SDA；9 个时钟足够走完一个字节。 */
     (void)HAL_I2C_DeInit(&hi2c1);
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    g.Pin   = (uint32_t)(IMU_SCL_PIN | IMU_SDA_PIN);
+    g.Mode  = GPIO_MODE_OUTPUT_OD;
+    g.Pull  = GPIO_PULLUP;
+    g.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(IMU_SCL_PORT, &g);
+
+    HAL_GPIO_WritePin(IMU_SDA_PORT, IMU_SDA_PIN, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_SET);
+    hw_recover_delay();
+
+    for (i = 0U; i < 9U; i++)
+    {
+        HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_RESET);
+        hw_recover_delay();
+        HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_SET);
+        hw_recover_delay();
+    }
+
+    /* 2) 补一个 STOP：SCL 高电平期间 SDA 由低变高 */
+    HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_RESET);
+    hw_recover_delay();
+    HAL_GPIO_WritePin(IMU_SDA_PORT, IMU_SDA_PIN, GPIO_PIN_RESET);
+    hw_recover_delay();
+    HAL_GPIO_WritePin(IMU_SCL_PORT, IMU_SCL_PIN, GPIO_PIN_SET);
+    hw_recover_delay();
+    HAL_GPIO_WritePin(IMU_SDA_PORT, IMU_SDA_PIN, GPIO_PIN_SET);
+    hw_recover_delay();
+
+    /* 3) 重新初始化外设：MspInit 会把 PB6/PB7 切回复用开漏，
+          并把硬件 I2C 状态机、错误标志全部清干净 */
     (void)HAL_I2C_Init(&hi2c1);
 }
 

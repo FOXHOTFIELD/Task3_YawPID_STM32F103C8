@@ -152,6 +152,10 @@ static void cmd_onoff(const char *key, const char *val)
     {
         ctl_set_bias_auto(on);
     }
+    else if (util_str_eq_ci(key, "IMU"))
+    {
+        ctl_set_imu_dump((uint8_t)((on != 0U) ? 2U : 0U));
+    }
     else
     {
         ok = 0U;
@@ -502,6 +506,21 @@ static void cmd_bare(const char *key)
     {
         app_print_info();
     }
+    else if (util_str_eq_ci(key, "IMUINIT"))
+    {
+        /* 线松过/掉电后不用重启板子：重新探测 IMU，成功则自动重做零偏标定 */
+        if (ctl_imu_reinit() == 0U)
+        {
+            reply_err(ctl_imu_ok() != 0U ? "STATE" : "IMU");
+            return;
+        }
+        logln("OK:IMUINIT");
+    }
+    else if (util_str_eq_ci(key, "IMU"))
+    {
+        ctl_set_imu_dump(1U);       /* 打一条六轴原始数据 */
+        logln("OK:IMU (one sample follows)");
+    }
     else if (util_str_eq_ci(key, "STAT") || util_str_eq_ci(key, "S"))
     {
         app_print_status();
@@ -528,9 +547,11 @@ static void cmd_bare(const char *key)
         logln(" FB=IMU|ENC|FUSE feedback source (ENC for tuning, IMU for acceptance)");
         logln(" CPD=<n>         encoder counts per degree (calibrate against gyro)");
         logln(" SIG=1|-1        encoder counting direction vs yaw");
+        logln(" GSIG=1|-1       gyro Z mount direction (+1 chip up, -1 chip down)");
         logln(" FWD/REV/BRK/COAST/DUTY=<pm>  open-loop test (IDLE only)");
         logln(" STREAM=ON|OFF / RAW=ON|OFF / PROTO=FIRE|JUST");
-        logln(" STAT=ON|OFF / INFO / ENC / RESET");
+        logln(" STAT=ON|OFF / INFO / ENC / RESET / IMU[=ON|OFF]");
+        logln(" IMUINIT         re-probe the MPU6050 (after a loose wire), recalibrates");
     }
     else if (util_str_eq_ci(key, "RESET"))
     {
@@ -543,6 +564,7 @@ static void cmd_bare(const char *key)
         (void)ctl_set_fb((ctl_fb_t)FB_SOURCE_DEFAULT);
         ctl_set_cpd(ENC_CPD_DEFAULT);
         ctl_set_enc_sign(ENC_SIGN_DEFAULT);
+        ctl_set_gyro_sign(GYRO_SIGN_DEFAULT);
         tb_set_deadzone(MOTOR_DEADZONE_PM);
         tb_set_kick(MOTOR_KICK_PM, MOTOR_KICK_MS);
         tb_set_invert(MOTOR_DIR_INVERT);
@@ -734,6 +756,24 @@ static void cli_exec(char *line)
                 logln("OK:SIG=%d (encoder angle reset, send ZERO again)", (int)ctl_enc_sign());
             }
         }
+        else if (util_str_eq_ci(key, "GSIG"))
+        {
+            float v;
+
+            if (util_parse_float(val, &v) == 0U)
+            {
+                reply_err("SYNTAX");
+            }
+            else if ((v != 1.0f) && (v != -1.0f))
+            {
+                reply_err("RANGE");
+            }
+            else
+            {
+                ctl_set_gyro_sign(v);
+                logln("OK:GSIG=%d (yaw reset, recalibrating)", (int)ctl_gyro_sign());
+            }
+        }
         else if (util_str_eq_ci(key, "DUTY"))
         {
             cmd_duty(val);
@@ -745,7 +785,7 @@ static void cli_exec(char *line)
         else if (util_str_eq_ci(key, "STREAM") || util_str_eq_ci(key, "RAW") ||
                  util_str_eq_ci(key, "STAT") || util_str_eq_ci(key, "ZUPT") ||
                  util_str_eq_ci(key, "STALL") || util_str_eq_ci(key, "INV") ||
-                 util_str_eq_ci(key, "BIASAUTO"))
+                 util_str_eq_ci(key, "BIASAUTO") || util_str_eq_ci(key, "IMU"))
         {
             cmd_onoff(key, val);
         }

@@ -124,8 +124,14 @@ void app_print_info(void)
           (unsigned)tb_invert(), tb_state_str());
 
     vofa_format_float(b, ctl_bias_dps(), 3U);
-    logln("imu  : %s bias=%s dps cal_quality=%u errs=%lu", ctl_imu_status_str(), b,
-          (unsigned)ctl_calib_quality(), (unsigned long)ctl_imu_errors());
+    {
+        char b_cal[16];
+
+        vofa_format_float(b_cal, ctl_bias_cal(), 3U);
+        logln("imu  : %s bias=%s dps bcal=%s cal_quality=%u errs=%lu",
+              ctl_imu_status_str(), b, b_cal,
+              (unsigned)ctl_calib_quality(), (unsigned long)ctl_imu_errors());
+    }
 
     {
         char b_cpd[16];
@@ -135,8 +141,9 @@ void app_print_info(void)
         vofa_format_float(b_cpd, ctl_cpd(), 3U);
         vofa_format_float(b_edeg, ctl_enc_deg(), 3U);
         vofa_format_float(b_d, ctl_imu_enc_diff(), 3U);
-        logln("fb   : %s cpd=%s sign=%d enc_deg=%s (imu-enc)=%s",
-              ctl_fb_str(), b_cpd, (int)ctl_enc_sign(), b_edeg, b_d);
+        logln("fb   : %s cpd=%s sign=%d gsig=%d enc_deg=%s (imu-enc)=%s",
+              ctl_fb_str(), b_cpd, (int)ctl_enc_sign(), (int)ctl_gyro_sign(),
+              b_edeg, b_d);
     }
     logln("stream: %s proto=%s raw=%u frames=%lu",
           (s_stream_on != 0U) ? "ON" : "OFF", vofa_mode_str(),

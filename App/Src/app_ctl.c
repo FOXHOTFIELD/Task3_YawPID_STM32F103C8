@@ -39,6 +39,17 @@
 #define STALL_TIMEOUT_MS    2000U
 #define ZUPT_RUN_OUT_MIN    200     /* 闭环时输出小于它才允许判"静止" */
 #define ZUPT_LEARN_MS       1000U   /* 静止超过这么久才开始在线学零偏 */
+#define IMU_DUMP_DIV        10U     /* 六轴转储分频：200Hz/10 = 20Hz */
+/* 在线学零偏的两道闸（v1.2.2 补的）：
+ * 踩过的坑：怠速零偏跟踪器的判据只有"电机没出力"和"|gz-bias|<10dps"，
+ * 于是转盘**慢慢转**（<10dps）时，真实转速会被当成零偏学进去；学到 12.7dps
+ * 之后 |gz-bias| 永远大于 10dps 门限，**再也回不来**，yaw 就以这个假零偏
+ * 一路漂（实测 30s 漂掉 130°，还让整个 FB=IMU 看起来像"传感器坏了"）。
+ *   闸 1：编码器不动超过 IDLE_BIAS_STILL_MS 才允许学（编码器是机械硬连接，
+ *         比陀螺自己判断"静止"可靠得多）；
+ *   闸 2：学到的零偏只能在标定值 ±IDLE_BIAS_MAX_DELTA_DPS 内。 */
+#define IDLE_BIAS_STILL_MS  500U
+#define IDLE_BIAS_MAX_DELTA_DPS  4.0f
 
 static ctl_state_t s_state = CTL_STATE_BOOT;
 static ctl_fault_t s_fault = CTL_FAULT_NONE;
@@ -81,6 +92,8 @@ static uint32_t s_manual_ms;   /* 最近一次开环点动的时刻，用于超�
 
 /* 怠速零偏在线跟踪 */
 static uint8_t s_bias_auto = (uint8_t)IDLE_BIAS_ENABLE;
+static float   s_bias_cal;     /* 最近一次 CAL 得到的零偏，作为在线学习的基准 */
+static uint32_t s_enc_still_ms; /* 编码器连续不动了多久 */
 
 /* 输出限幅（OMAX）：调参期间限制最大力度，防止算错把转盘甩到限位 */
 static int16_t s_out_max = (int16_t)OUTPUT_LIMIT_DEFAULT_PM;
@@ -94,13 +107,21 @@ static float    s_enc_deg;                                  /* 编码器连续�
 static float    s_enc_rate;                                 /* 编码器角速度（低通后） */
 static float    s_cpd      = ENC_CPD_DEFAULT;               /* counts per 转盘度 */
 static float    s_enc_sign = ENC_SIGN_DEFAULT;              /* ±1 */
+static float    s_gyro_sign = GYRO_SIGN_DEFAULT;            /* ±1，见 board_config.h */
+
+/* IMU 六轴转储：0=关, 1=打一条, 2=连续（IMU_DUMP_DIV 分频） */
+static uint8_t  s_imu_dump;
+static uint8_t  s_imu_dump_cnt;
 static float    s_fb_deg;                                   /* 闭环真正用的连续角 */
 static float    s_fb_rate;                                  /* 闭环真正用的角速度 */
+static float    s_ctl_rate;                                 /* 控制用角速度（陀螺再低通一次） */
 static float    s_fuse_deg;                                 /* 互补滤波状态 */
 static int16_t  s_stall_pm_min = STALL_PM_MIN;
 /* ==================================================================
  * 内部工具
  * ================================================================== */
+static int16_t ctl_enc_dir(int16_t pm);     /* 定义在后面，限位守卫要先用 */
+
 static void ctl_dwt_init(void)
 {
     DEMCR_REG     |= DEMCR_TRCENA;
@@ -150,11 +171,59 @@ static void ctl_sample_zero(imu_sample_t *s)
     s->temp_c  = 0.0f;
 }
 
+/* 在线学零偏的唯一入口：带"只能在标定值附近"的硬闸 */
+static void ctl_bias_learn(float gz_dps, float alpha)
+{
+    float bias = s_yaw.bias_dps + (alpha * (gz_dps - s_yaw.bias_dps));
+    float lo   = s_bias_cal - IDLE_BIAS_MAX_DELTA_DPS;
+    float hi   = s_bias_cal + IDLE_BIAS_MAX_DELTA_DPS;
+
+    if (bias < lo)
+    {
+        bias = lo;
+    }
+    else if (bias > hi)
+    {
+        bias = hi;
+    }
+    yaw_set_bias(&s_yaw, bias);
+}
+
+/* 六轴原始转储一行（IMU / IMU=ON 命令用）。
+ * gzraw 是芯片原样输出，gzs 是乘过 GYRO_SIGN 之后真正进控制的值。
+ * 判读方法：
+ *   - 只有 gz 稳在非零、gx/gy 和加速度都安静 -> 纯绕 Z 的假角速度；
+ *   - gx/gy 或 ax/ay 在摆                     -> 小板本身在动（安装不刚性）；
+ *   - 六个都跳得厉害                          -> I2C 读到坏数据。 */
+static void ctl_imu_dump_line(const imu_sample_t *s, float gz_raw)
+{
+    char b_ax[12];
+    char b_ay[12];
+    char b_az[12];
+    char b_gx[12];
+    char b_gy[12];
+    char b_gzr[12];
+    char b_gzs[12];
+    char b_t[12];
+
+    vofa_format_float(b_ax,  s->ax_g, 3U);
+    vofa_format_float(b_ay,  s->ay_g, 3U);
+    vofa_format_float(b_az,  s->az_g, 3U);
+    vofa_format_float(b_gx,  s->gx_dps, 2U);
+    vofa_format_float(b_gy,  s->gy_dps, 2U);
+    vofa_format_float(b_gzr, gz_raw, 2U);
+    vofa_format_float(b_gzs, s->gz_dps, 2U);
+    vofa_format_float(b_t,   s->temp_c, 1U);
+
+    logln("IMU ax=%s ay=%s az=%s gx=%s gy=%s gzraw=%s gzs=%s temp=%s",
+          b_ax, b_ay, b_az, b_gx, b_gy, b_gzr, b_gzs, b_t);
+}
+
 /* ---------------- 编码器角度累加 ----------------
  * count -> 转盘度：inc = delta * sign / cpd。
  * cpd 是"每转盘度多少 count"，已经把减速比和编码器线数一起折进去了，
  * 用 CPD= 命令可以现场改（标定方法见 README）。
- * 速度用一阶低通：一拍里 1 个 count 就是 14.7dps 的台阶，不滤的话
+ * 速度用一阶低通：一拍里 1 个 count 就是 28.8dps 的台阶，不滤的话
  * 微分项会被量化噪声打得乱跳。 */
 static void ctl_enc_update(float dt)
 {
@@ -219,12 +288,45 @@ static void ctl_fb_update(float dt)
     }
 }
 
+/* ---------------- 控制用角速度 ----------------
+ * 编码器测速在 ctl_enc_update 里已经按 ENC_RATE_TAU_MS 滤过一遍，直接用。
+ * 陀螺是"原始角速度"，里面带着粘滑冲击（实测峰值 ±400dps，编码器只有 ±80dps）。
+ * 这些冲击喂给 Kd 和制动增强会把环路变成 bang-bang：Kd=2 时 800pm 每拍打满、
+ * 制动增强每个尖峰都 ×3，于是转盘以 5Hz 在 22~35° 之间来回撞。
+ * 所以陀螺反馈要再做一次低通，只滤给控制用；STAT/流里的 rate 仍是原始值，
+ * 方便你看到真实角速度。 */
+static void ctl_rate_update(float dt)
+{
+    float a;
+
+    if ((s_fb == CTL_FB_ENC) || (dt <= 0.0f))
+    {
+        s_ctl_rate = s_fb_rate;         /* 编码器：已滤过，不重复加滞后 */
+        return;
+    }
+
+    a = (dt * 1000.0f) / (float)CTL_RATE_TAU_IMU_MS;
+    if (a > 1.0f)
+    {
+        a = 1.0f;
+    }
+    s_ctl_rate += (a * (s_fb_rate - s_ctl_rate));
+}
+
 /* ==================================================================
  * 初始化与标定
  * ================================================================== */
 static uint8_t ctl_imu_setup(void)
 {
     mpu_status_t st;
+
+    /* 上一次没成功（线松过、从机把 SDA 拉死过、供电抖过）就先做一次总线恢复：
+       9 个 SCL 时钟把从机未完成的字节走完 + 一个 STOP，再重配外设。
+       有了它，IMU 掉线后可以用 IMUINIT 命令重试，不必重启整块板子。 */
+    if (s_mpu_status != MPU_OK)
+    {
+        i2c_bus_recover();
+    }
 
     if (i2c_bus_init() != HAL_OK)
     {
@@ -301,6 +403,7 @@ static void ctl_finish_calib(uint32_t now)
     }
 
     yaw_set_bias(&s_yaw, mean);
+    s_bias_cal = mean;          /* 在线学习只允许在这个基准附近有限范围内动 */
     yaw_reset(&s_yaw, 0.0f);
     s_target = 0.0f;
     s_state  = CTL_STATE_IDLE;
@@ -343,8 +446,12 @@ void ctl_init(void)
     s_enc_rate  = 0.0f;
     s_cpd       = ENC_CPD_DEFAULT;
     s_enc_sign  = ENC_SIGN_DEFAULT;
+    s_gyro_sign = GYRO_SIGN_DEFAULT;
+    s_bias_cal  = 0.0f;
+    s_enc_still_ms = 0U;
     s_fb_deg    = 0.0f;
     s_fb_rate   = 0.0f;
+    s_ctl_rate  = 0.0f;
     s_fuse_deg  = 0.0f;
     s_stall_pm_min = (s_fb == CTL_FB_ENC) ? (int16_t)STALL_PM_MIN_ENC : (int16_t)STALL_PM_MIN;
     if (s_fb == CTL_FB_ENC)
@@ -404,6 +511,18 @@ void ctl_step(void)
     enc_update(dt);
     ctl_enc_update(dt);
 
+    /* 编码器"连续不动"计时：在线学零偏和 ZUPT 都要用它当判据。
+       编码器装在电机轴上、机械硬连接，转盘真的不动它才不动，
+       比拿陀螺自己的角速度判"静止"可靠（陀螺判据会被错零偏带偏）。 */
+    if (enc_delta() != 0)
+    {
+        s_enc_still_ms = 0U;
+    }
+    else if (s_enc_still_ms < IDLE_BIAS_STILL_MS)
+    {
+        s_enc_still_ms += (uint32_t)CTRL_PERIOD_MS;
+    }
+
     /* ---------------- BOOT：等 IMU 就绪 ---------------- */
     if (s_state == CTL_STATE_BOOT)
     {
@@ -448,6 +567,34 @@ void ctl_step(void)
         s_imu_err    = 0U;
         s_imu_ok     = 1U;
         s_mpu_status = MPU_OK;
+    }
+
+    /* ---------------- 安装方向补偿 ----------------
+     * 只在这里翻一次符号，后面零偏标定 / ZUPT / 怠速零偏 / yaw 积分全都拿
+     * 同一套符号，不会出现"标定用原始符号、积分用翻转符号"这种分裂。
+     * 本机芯片面朝下装（Z 轴向下），取 -1，理由见 board_config.h。 */
+    {
+        float gz_raw = sample.gz_dps;
+
+        sample.gz_dps *= s_gyro_sign;
+
+        /* IMU 六轴原始转储：诊断"陀螺假角速度"用。
+         * gzraw 是芯片原样输出，gzs 是符号补偿之后进控制的值。
+         * 若只有 gz 稳在某个非零值、gx/gy 与加速度都安静，那是纯绕 Z 的
+         * 假角速度；若 gx/gy 或 ax/ay 在摆，说明小板本身在动/在扭。 */
+        if (s_imu_dump != 0U)
+        {
+            s_imu_dump_cnt++;
+            if ((s_imu_dump == 1U) || (s_imu_dump_cnt >= IMU_DUMP_DIV))
+            {
+                s_imu_dump_cnt = 0U;
+                ctl_imu_dump_line(&sample, gz_raw);
+                if (s_imu_dump == 1U)
+                {
+                    s_imu_dump = 0U;        /* 单次模式打完就关 */
+                }
+            }
+        }
     }
 
     /* ---------------- 标定：累计零偏统计 ---------------- */
@@ -513,8 +660,7 @@ void ctl_step(void)
         /* 长时间静止时用很小的系数在线修正零偏，进一步压漂移 */
         if ((s_zupt_active != 0U) && (s_still_ms >= (ZUPT_HOLD_MS + ZUPT_LEARN_MS)))
         {
-            float bias = s_yaw.bias_dps + (ZUPT_LEARN_ALPHA * (sample.gz_dps - s_yaw.bias_dps));
-            yaw_set_bias(&s_yaw, bias);
+            ctl_bias_learn(sample.gz_dps, ZUPT_LEARN_ALPHA);
         }
     }
 
@@ -524,6 +670,7 @@ void ctl_step(void)
        电机没出力 = 转盘默认静止，这时用 15s 时间常数把零偏拉向当前 gz：
        零偏漂移会在几十秒内被吃掉；手快转（>10dps）因门限不会被学进去。 */
     if ((IDLE_BIAS_ENABLE != 0U) && (s_bias_auto != 0U) &&
+        (s_enc_still_ms >= IDLE_BIAS_STILL_MS) &&
         (util_absf(sample.gz_dps - s_yaw.bias_dps) < IDLE_BIAS_GATE_DPS))
     {
         uint8_t idle = 0U;
@@ -542,8 +689,8 @@ void ctl_step(void)
         if (idle != 0U)
         {
             float alpha = (float)CTRL_PERIOD_MS / (float)IDLE_BIAS_TAU_MS;
-            float bias  = s_yaw.bias_dps + (alpha * (sample.gz_dps - s_yaw.bias_dps));
-            yaw_set_bias(&s_yaw, bias);
+
+            ctl_bias_learn(sample.gz_dps, alpha);
         }
     }
 
@@ -551,6 +698,7 @@ void ctl_step(void)
 
     /* 选出这一拍闭环真正用的角度：ENC（不漂）/ IMU（任务书主反馈）/ FUSE */
     ctl_fb_update(dt);
+    ctl_rate_update(dt);        /* 陀螺反馈要再低通一次，见 ctl_rate_update 注释 */
 
     /* 最近路径误差：目标 -170°、当前 +170° 时误差是 +20°，不是 -340°。
        IDLE 时也一直算，STAT/INFO 直接能看到离目标还有多少。 */
@@ -560,10 +708,11 @@ void ctl_step(void)
     if (s_state == CTL_STATE_RUN)
     {
         float out;
+        float brake_thr;
 
         /* 用连续角做 PID 的输入输出，避免在 ±180 处跳变：
            等效目标 = 当前连续角 + 最短路径误差 */
-        pid_set_rate(&s_pid, s_fb_rate);    /* 微分项用干净的速度观测 */
+        pid_set_rate(&s_pid, s_ctl_rate);   /* 微分项用干净的速度观测 */
         out = pid_update(&s_pid, s_fb_deg + s_error, s_fb_deg, dt);
 
         /* 软限位保护排线：接近限位时只允许往回收方向出力 */
@@ -579,9 +728,13 @@ void ctl_step(void)
         /* 制动增强（见 board_config）：
            只有"误差与速度反号"才是被外力推离目标，这时全力抵抗；
            朝目标收敛时（同号）保持正常限幅——那一阶段该由 Kd 做阻尼，
-           再放大只会刹过头反向冲出去（实测过：反向超调 14°）。 */
-        if ((util_absf(s_fb_rate) > BRAKE_RATE_DPS) &&
-            ((s_error * s_fb_rate) < 0.0f))
+           再放大只会刹过头反向冲出去（实测过：反向超调 14°）。
+           v1.2.4：门限和判据改用 ctl_rate（滤波后）。陀螺原始角速度里
+           带着粘滑冲击 ±400dps，用它当判据会让每次滑动都触发 ×3，环路
+           变成 bang-bang 并自持振荡。 */
+        brake_thr = (s_fb == CTL_FB_ENC) ? BRAKE_RATE_DPS : BRAKE_RATE_IMU_DPS;
+        if ((util_absf(s_ctl_rate) > brake_thr) &&
+            ((s_error * s_ctl_rate) < 0.0f))
         {
             out *= (float)BRAKE_BOOST_NUM;
             if (out > (float)OUTPUT_BRAKE_PM) { out = (float)OUTPUT_BRAKE_PM; }
@@ -655,7 +808,8 @@ void ctl_step(void)
             ctl_raise_fault(CTL_FAULT_LIMIT);
             return;
         }
-        if ((m > (s_limit - SOFT_LIMIT_MARGIN_DEG)) && ((s_fb_deg * (float)c) > 0.0f))
+        if ((m > (s_limit - SOFT_LIMIT_MARGIN_DEG)) &&
+            ((s_fb_deg * (float)ctl_enc_dir(c)) > 0.0f))
         {
             tb_coast();
             logln("LIMIT: manual blocked, only %d deg left", (int)(s_limit - m));
@@ -698,6 +852,7 @@ void ctl_zero_yaw(void)
     s_fuse_deg = 0.0f;
     s_fb_deg   = 0.0f;
     s_fb_rate  = 0.0f;
+    s_ctl_rate = 0.0f;
 }
 
 uint8_t ctl_set_target(float deg)
@@ -772,24 +927,46 @@ uint8_t ctl_clear_fault(void)
     return 1U;
 }
 
+/* 一条开环命令 pm 会让"编码器角"往哪个方向走：+1 增大 / -1 减小。
+ *
+ * 限位守卫必须用这个方向判断"是不是在往外推"，否则会出现
+ * "往外推被放行、往回拉被全拒"——实测把转盘卡在 +169° 出不来。
+ * 方向由三个开关共同决定，写死任何一个都会在改配置后失效：
+ *   1. 电机线是否接反（INV）；
+ *   2. 编码器计数方向（SIG）；
+ *   3. 命令符号本身。
+ * 本机基准（INV=ON、SIG=+1）：DUTY=120 实测编码器角 +31.6°，即 pm>0 -> 增大。 */
+static int16_t ctl_enc_dir(int16_t pm)
+{
+    int16_t d = (pm >= 0) ? 1 : -1;
+
+    if (tb_invert() == 0U)
+    {
+        d = (int16_t)(-d);          /* 基准是 INV=ON，关掉就整体翻一次 */
+    }
+    if (s_enc_sign < 0.0f)
+    {
+        d = (int16_t)(-d);
+    }
+    return d;
+}
+
 uint8_t ctl_manual(int16_t pm)
 {
-    float   m;
-    int16_t eff;    /* 取反之后真正作用到电机的方向 */
+    float m;
 
     if (s_state != CTL_STATE_IDLE)
     {
         return 0U;      /* 闭环时不允许开环点动 */
     }
 
-    /* 限位守卫必须按"电机实际转向"判断：INV=ON 时正命令其实是反转。
-       以前这里直接用 pm，接上 INV 后守卫方向是反的，反向脉冲会被全部
-       拒绝，只剩单向累积——实测把转盘一路推到 +121° 撞限位。 */
-    eff = (tb_invert() != 0U) ? (int16_t)(-pm) : pm;
-
-    /* 开环点动也要尊重限位：剩余角度不足且方向朝外，直接拒绝 */
+    /* 开环点动也要尊重限位：剩余角度不足且方向朝外，直接拒绝。
+       注意判据用的是"编码器角会往哪走"（ctl_enc_dir），不是取反后的 eff：
+       早期用 eff 判断，结果朝外的命令被放行、朝内的命令被全拒，
+       转盘只能单向累积，实测卡在 +169° 退不回来。 */
     m = util_absf(s_fb_deg);
-    if ((eff != 0) && (m > (s_limit - SOFT_LIMIT_MARGIN_DEG)) && ((s_fb_deg * (float)eff) > 0.0f))
+    if ((pm != 0) && (m > (s_limit - SOFT_LIMIT_MARGIN_DEG)) &&
+        ((s_fb_deg * (float)ctl_enc_dir(pm)) > 0.0f))
     {
         return 0U;
     }
@@ -1033,6 +1210,73 @@ float ctl_enc_sign(void)
     return s_enc_sign;
 }
 
+/**
+ * @brief 陀螺 Z 轴安装方向：+1 芯片面朝上，-1 面朝下（倒装）
+ *
+ * 改符号必须连带把零偏与 yaw 清零：零偏是在旧符号下测的，
+ * 直接沿用会让 yaw 以 2×bias 的速率跑。所以这里顺带重新标定。
+ */
+void ctl_set_gyro_sign(float sign)
+{
+    float s = (sign < 0.0f) ? -1.0f : 1.0f;
+
+    if (s != s_gyro_sign)
+    {
+        s_gyro_sign = s;
+        s_yaw.bias_dps = 0.0f;
+        s_yaw.cont     = 0.0f;
+        s_yaw.rate_dps = 0.0f;
+        s_enc_deg      = 0.0f;
+        s_enc_rate     = 0.0f;
+        s_fuse_deg     = 0.0f;
+        s_fb_deg       = 0.0f;
+        s_cal_quality  = 0U;
+        s_bias_cal     = 0.0f;
+        pid_reset(&s_pid);
+        ctl_request_calib();        /* 符号变了，零偏必须重测 */
+    }
+}
+
+float ctl_gyro_sign(void)
+{
+    return s_gyro_sign;
+}
+
+/**
+ * @brief 重新探测 IMU（掉线恢复用，对应串口命令 IMUINIT）
+ * @return 1 = 探测成功并已开始零偏标定；0 = 仍失败或正在 RUN
+ *
+ * 为什么需要它：固件只在开机调 ctl_imu_setup() 一次，失败后只有 FB=IMU/FUSE
+ * 会进入 BOOT 重试态；FB=ENC 时永不重试，线一松就非得重启整块板子。
+ * 有了这条命令，插好线直接 IMUINIT 就能回来，标定随之自动重做。
+ */
+uint8_t ctl_imu_reinit(void)
+{
+    if (s_state == CTL_STATE_RUN)
+    {
+        return 0U;
+    }
+
+    if (ctl_imu_setup() == 0U)
+    {
+        return 0U;
+    }
+
+    logln("IMU online: %s addr=0x%02X", mpu_chip_name(), (unsigned)mpu_addr());
+    ctl_begin_calib(HAL_GetTick());
+    return 1U;
+}
+
+/**
+ * @brief IMU 六轴原始转储开关
+ * @param mode 0=关，1=打一条，2=连续（20Hz）
+ */
+void ctl_set_imu_dump(uint8_t mode)
+{
+    s_imu_dump     = (uint8_t)((mode > 2U) ? 2U : mode);
+    s_imu_dump_cnt = 0U;
+}
+
 float ctl_enc_deg(void)
 {
     return s_enc_deg;
@@ -1114,6 +1358,11 @@ float ctl_rate_dps(void)
 float ctl_bias_dps(void)
 {
     return s_yaw.bias_dps;
+}
+
+float ctl_bias_cal(void)
+{
+    return s_bias_cal;
 }
 
 float ctl_error(void)

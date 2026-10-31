@@ -92,6 +92,9 @@ void            ctl_set_cpd(float cpd);      /**< 编码器每转盘度的计数
 float           ctl_cpd(void);
 void            ctl_set_enc_sign(float s);   /**< ±1，编码器方向 */
 float           ctl_enc_sign(void);
+void            ctl_set_gyro_sign(float s);  /**< ±1，陀螺 Z 轴安装方向（会重新标定） */
+float           ctl_gyro_sign(void);
+void            ctl_set_imu_dump(uint8_t mode); /**< 0=关 1=打一条 2=连续20Hz */
 float           ctl_enc_deg(void);           /**< 编码器连续角（度） */
 float           ctl_enc_rate_dps(void);      /**< 编码器测得的角速度 */
 float           ctl_fb_deg(void);            /**< 当前闭环真正用的连续角 */
@@ -107,6 +110,7 @@ float           ctl_yaw(void);
 float           ctl_yaw_cont(void);
 float           ctl_rate_dps(void);
 float           ctl_bias_dps(void);
+float           ctl_bias_cal(void);       /**< 最近一次 CAL 的零偏基准（在线学习围绕它） */
 float           ctl_error(void);
 int16_t         ctl_output_pm(void);
 int16_t         ctl_duty_pm(void);
@@ -114,6 +118,7 @@ uint32_t        ctl_ctrl_count(void);
 uint8_t         ctl_saturated(void);
 uint8_t         ctl_ready(void);          /**< 标定完成、可 START */
 uint8_t         ctl_imu_ok(void);
+uint8_t         ctl_imu_reinit(void);     /**< 重新探测 IMU（IMUINIT），成功会重做零偏标定 */
 uint8_t         ctl_calib_quality(void);  /**< 标定期间静止质量 0..100 */
 uint32_t        ctl_imu_errors(void);
 const char     *ctl_imu_status_str(void);
