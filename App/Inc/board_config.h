@@ -38,7 +38,7 @@ extern "C" {
 #include "stm32f1xx_hal.h"
 
 /* ================= 固件版本 ================= */
-#define FW_VERSION_STR            "v1.2.5"   /* 改固件时同步改这里，INFO 会打印 */
+#define FW_VERSION_STR            "v1.2.6"   /* 改固件时同步改这里，INFO 会打印 */
 
 /* ================= 时钟 ================= */
 #define BOARD_SYSCLK_HZ           72000000UL
@@ -242,7 +242,7 @@ extern "C" {
  *   超调 1.59°、上升 0.171s、稳定 0.222s、静差 -0.03°、抖动 0.002°。
  * 切换 FB 时 ctl_set_fb() 会自动套用对应的一组，避免"切了反馈忘了改增益"。 */
 #define PID_KP_IMU_DEFAULT        12.0f
-#define PID_KI_IMU_DEFAULT        1.5f
+#define PID_KI_IMU_DEFAULT        0.8f
 #define PID_KD_IMU_DEFAULT        0.0f
 #define PID_D_LPF_DEFAULT         0.70f   /* 微分项低通，越大越平滑 */
 #define PID_OUT_LIMIT_PM          1000.0f
