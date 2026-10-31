@@ -38,7 +38,7 @@ extern "C" {
 #include "stm32f1xx_hal.h"
 
 /* ================= 固件版本 ================= */
-#define FW_VERSION_STR            "v1.2.4"   /* 改固件时同步改这里，INFO 会打印 */
+#define FW_VERSION_STR            "v1.2.5"   /* 改固件时同步改这里，INFO 会打印 */
 
 /* ================= 时钟 ================= */
 #define BOARD_SYSCLK_HZ           72000000UL
@@ -233,6 +233,17 @@ extern "C" {
 #define PID_KP_DEFAULT            30.0f
 #define PID_KI_DEFAULT            1.5f
 #define PID_KD_DEFAULT            2.0f
+
+/* ---- 陀螺/融合反馈专用的增益组（v1.2.5）----
+ * 上面那组是"电机轴编码器"的整定值：反馈几乎无滞后，可以用高带宽。
+ * 换成陀螺反馈后，闭环套的是"转盘"，中间隔着皮带/齿轮的弹性与约 5° 回程
+ * 间隙，带宽一高就把弹性传动激成 5Hz 极限环（实测超调 10°、抖动 5.8°）。
+ * 实测把 Kp 降到 12、去掉 Kd 之后，同样的大位移反向序列反而全面更好：
+ *   超调 1.59°、上升 0.171s、稳定 0.222s、静差 -0.03°、抖动 0.002°。
+ * 切换 FB 时 ctl_set_fb() 会自动套用对应的一组，避免"切了反馈忘了改增益"。 */
+#define PID_KP_IMU_DEFAULT        12.0f
+#define PID_KI_IMU_DEFAULT        1.5f
+#define PID_KD_IMU_DEFAULT        0.0f
 #define PID_D_LPF_DEFAULT         0.70f   /* 微分项低通，越大越平滑 */
 #define PID_OUT_LIMIT_PM          1000.0f
 #define OUTPUT_LIMIT_DEFAULT_PM   300     /* 正常出力上限；制动时有 BRAKE_BOOST_NUM 倍 */

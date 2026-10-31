@@ -466,6 +466,17 @@ void ctl_init(void)
     pid_set_d_lpf(&s_pid, PID_D_LPF_DEFAULT);
     pid_set_rate_source(&s_pid, 1U);    /* 微分用编码器/陀螺测速，不用位置差分 */
 
+    /* 开机默认反馈源对应的增益组（与 ctl_set_fb 的自动套用保持一致）：
+       FB_SOURCE_DEFAULT 配成 IMU 时不能再用编码器那套高带宽参数 */
+    if (s_fb == CTL_FB_ENC)
+    {
+        pid_set_gains(&s_pid, PID_KP_DEFAULT, PID_KI_DEFAULT, PID_KD_DEFAULT);
+    }
+    else
+    {
+        pid_set_gains(&s_pid, PID_KP_IMU_DEFAULT, PID_KI_IMU_DEFAULT, PID_KD_IMU_DEFAULT);
+    }
+
     yaw_init(&s_yaw, 0.0f);
 
     tb_init();
@@ -1168,6 +1179,21 @@ uint8_t ctl_set_fb(ctl_fb_t fb)
     {
         s_stall_pm_min = (int16_t)STALL_PM_MIN;
     }
+
+    /* 每种反馈源有自己的整定值：编码器在电机轴上、几乎无滞后，可以用高
+       带宽；陀螺闭环套的是转盘，隔着弹性传动和回程间隙，必须降带宽。
+       这里随切换自动套用，省得"换了反馈忘了改增益"再把环路激振。 */
+    if (fb == CTL_FB_ENC)
+    {
+        ctl_set_gains(PID_KP_DEFAULT, PID_KI_DEFAULT, PID_KD_DEFAULT);
+    }
+    else
+    {
+        ctl_set_gains(PID_KP_IMU_DEFAULT, PID_KI_IMU_DEFAULT, PID_KD_IMU_DEFAULT);
+    }
+    logln("FB=%s gains -> %d/%d/%d (x100)",
+          ctl_fb_str(), (int)(s_pid.kp * 100.0f), (int)(s_pid.ki * 100.0f),
+          (int)(s_pid.kd * 100.0f));
     return 1U;
 }
 
