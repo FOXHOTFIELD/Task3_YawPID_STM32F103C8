@@ -115,6 +115,7 @@ static uint8_t  s_imu_dump_cnt;
 static float    s_fb_deg;                                   /* 闭环真正用的连续角 */
 static float    s_fb_rate;                                  /* 闭环真正用的角速度 */
 static float    s_ctl_rate;                                 /* 控制用角速度（陀螺再低通一次） */
+static uint16_t s_hold_ms;                                  /* "被外力按住"累计时长，见静态顶住增强 */
 static float    s_fuse_deg;                                 /* 互补滤波状态 */
 static int16_t  s_stall_pm_min = STALL_PM_MIN;
 /* ==================================================================
@@ -744,8 +745,39 @@ void ctl_step(void)
            带着粘滑冲击 ±400dps，用它当判据会让每次滑动都触发 ×3，环路
            变成 bang-bang 并自持振荡。 */
         brake_thr = (s_fb == CTL_FB_ENC) ? BRAKE_RATE_DPS : BRAKE_RATE_IMU_DPS;
-        if ((util_absf(s_ctl_rate) > brake_thr) &&
-            ((s_error * s_ctl_rate) < 0.0f))
+
+        /* v1.2.8 静态顶住增强（只给陀螺/融合反馈）：
+         * 原来的增强只在 |rate| > 门限 时生效，所以"手慢慢把转盘按住"这种
+         * 慢速外力几乎感觉不到抵抗——出力被 OMAX 卡在 40% 占空比不再随角度增长。
+         * 这里补一条：误差大 + 几乎不动 + 持续 BRAKE_HOLD_MS，就当成"被按住"，
+         * 也把出力放大到满档。
+         * 三个条件缺一不可，为的是不碰别的场景：
+         *   - 误差大：被推离目标才有；
+         *   - 几乎不动：阶跃起步/大行程时速度很快就上去了（实测 100ms 内），
+         *     计时器会立刻清零，所以不会被误触发成"起步就满力撞齿隙"；
+         *   - 持续 500ms：正常起步根本到不了这个时长，留了 5 倍余量。
+         * 编码器反馈不启用（那套参数已通过验收，不动它）。 */
+        if (s_fb != CTL_FB_ENC)
+        {
+            if ((util_absf(s_error) > BRAKE_HOLD_DEG) &&
+                (util_absf(s_ctl_rate) < BRAKE_HOLD_RATE_DPS) &&
+                (s_hold_ms < BRAKE_HOLD_MAX_MS))
+            {
+                s_hold_ms += CTRL_PERIOD_MS;
+            }
+            else
+            {
+                s_hold_ms = 0U;
+            }
+        }
+        else
+        {
+            s_hold_ms = 0U;
+        }
+
+        if (((util_absf(s_ctl_rate) > brake_thr) &&
+             ((s_error * s_ctl_rate) < 0.0f)) ||
+            (s_hold_ms >= BRAKE_HOLD_MS))
         {
             out *= (float)BRAKE_BOOST_NUM;
             if (out > (float)OUTPUT_BRAKE_PM) { out = (float)OUTPUT_BRAKE_PM; }
@@ -893,6 +925,7 @@ uint8_t ctl_start(void)
     pid_reset(&s_pid);
     s_error   = yaw_shortest_error(s_target, yaw_wrap180(s_fb_deg));
     s_out_pm  = 0;
+    s_hold_ms = 0U;
     s_state   = CTL_STATE_RUN;
 
     /* 堵转检测的参考时刻必须在启动时重新打点。

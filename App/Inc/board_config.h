@@ -38,7 +38,7 @@ extern "C" {
 #include "stm32f1xx_hal.h"
 
 /* ================= 固件版本 ================= */
-#define FW_VERSION_STR            "v1.2.7"   /* 改固件时同步改这里，INFO 会打印 */
+#define FW_VERSION_STR            "v1.2.8"   /* 改固件时同步改这里，INFO 会打印 */
 
 /* ================= 时钟 ================= */
 #define BOARD_SYSCLK_HZ           72000000UL
@@ -108,6 +108,17 @@ extern "C" {
  * BRAKE_RATE_IMU_DPS。编码器模式不受影响（它本来就被 ENC_RATE_TAU_MS 滤过）。 */
 #define CTL_RATE_TAU_IMU_MS       80U
 #define BRAKE_RATE_IMU_DPS        60.0f
+
+/* ---- 静态顶住增强（v1.2.8）----
+ * 原来的出力增强只在 |rate| > 门限 时生效，所以"用手慢慢把转盘按住"几乎
+ * 感觉不到抵抗：出力被 OMAX 卡在 40% 占空比，不再随偏角增长（实测手推
+ * 40 度时电机只给 40%，松手后才会喷到满档回位）。
+ * 这里补一条"被按住"判据：误差大 + 几乎不动 + 持续 BRAKE_HOLD_MS -> 也满档。
+ * 三个条件同时满足才不会误伤阶跃起步：正常起步 100ms 内速度就上去了。 */
+#define BRAKE_HOLD_DEG            10.0f   /* 误差超过它才算"被推离目标" */
+#define BRAKE_HOLD_RATE_DPS       25.0f   /* 速度低于它才算"被按住"，不是自己在动 */
+#define BRAKE_HOLD_MS             500U    /* 连续满足这么久才触发（起步留 5 倍余量） */
+#define BRAKE_HOLD_MAX_MS         15000U  /* 满档顶住的最长时间，过后回落到 OMAX，防堵转过热 */
 
 /* 启动"踢一脚"：换向瞬间额外给一段较强占空比，帮电机越过静摩擦。
    默认关闭（0），需要时用串口 KICK=<pm>,<ms> 打开。 */
