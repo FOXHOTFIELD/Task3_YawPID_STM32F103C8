@@ -1186,14 +1186,20 @@ uint8_t ctl_set_fb(ctl_fb_t fb)
     if (fb == CTL_FB_ENC)
     {
         ctl_set_gains(PID_KP_DEFAULT, PID_KI_DEFAULT, PID_KD_DEFAULT);
+        ctl_set_zupt((uint8_t)ZUPT_DEFAULT);    /* 编码器做反馈时 ZUPT 有好处 */
     }
     else
     {
         ctl_set_gains(PID_KP_IMU_DEFAULT, PID_KI_IMU_DEFAULT, PID_KD_IMU_DEFAULT);
+        /* 陀螺闭环必须关 ZUPT：ZUPT 在判"静止"期间把积分 dt 置 0，
+           而慢速转动时编码器很多拍是 0 增量、角速度又低于 1dps 门限，
+           会被整段误判成静止——实测一次手转只积到真实转角的 72%。
+           关了它并不影响锁定精度：60 秒锁定实测静态误差 -0.059 度。 */
+        ctl_set_zupt(0U);
     }
-    logln("FB=%s gains -> %d/%d/%d (x100)",
+    logln("FB=%s gains -> %d/%d/%d (x100) zupt=%s",
           ctl_fb_str(), (int)(s_pid.kp * 100.0f), (int)(s_pid.ki * 100.0f),
-          (int)(s_pid.kd * 100.0f));
+          (int)(s_pid.kd * 100.0f), (s_zupt_en != 0U) ? "ON" : "OFF");
     return 1U;
 }
 

@@ -38,7 +38,7 @@ extern "C" {
 #include "stm32f1xx_hal.h"
 
 /* ================= 固件版本 ================= */
-#define FW_VERSION_STR            "v1.2.6"   /* 改固件时同步改这里，INFO 会打印 */
+#define FW_VERSION_STR            "v1.2.7"   /* 改固件时同步改这里，INFO 会打印 */
 
 /* ================= 时钟 ================= */
 #define BOARD_SYSCLK_HZ           72000000UL
