@@ -34,5 +34,9 @@ desktop.ini
 *.tmp
 *.log
 
+# ===== Python 工具（tools/）=====
+__pycache__/
+*.pyc
+
 # 注意：Drivers/（HAL 与 CMSIS）必须入库，
 # 否则别人 clone 下来无法编译；它不属于编译产物。
