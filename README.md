@@ -259,7 +259,7 @@ STAT st=RUN fb=IMU tgt=0.000 yaw=0.062 cont=0.062 err=-0.062 left=129 out=-2 dut
 
 ## 六、VOFA+ 使用
 
-1. 数据引擎选 **FireWater**（默认，文本 `yaw:<Target>,<Yaw>\r\n`）或 **JustFloat**（小端 float + 帧尾 `00 80 7F`）；
+1. 数据引擎选 **FireWater**（默认，文本 `yaw:<Target>,<Yaw>\r\n`）或 **JustFloat**（小端 float + 帧尾 `00 00 80 7F`）；
 2. 串口 115200 打开，通道数 **2**（ch0=Target，ch1=Yaw）；发 `RAW=ON` 变 3 通道（ch2=角速度）；
 3. 建议 Y 轴范围 ±180°，X 轴显示最近 20s；
 4. 曲线判据：Target 阶跃后 Yaw 应在 0.3s 内贴住，稳态两条线间距即静态误差。
