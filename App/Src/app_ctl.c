@@ -314,6 +314,37 @@ static void ctl_rate_update(float dt)
     s_ctl_rate += (a * (s_fb_rate - s_ctl_rate));
 }
 
+/* ---------------- 目标路径选择 ----------------
+ * 只用"最短路径"会踩一个死锁：排线只允许转到 ±limit，而最短路径有时要求
+ * 穿过 ±180 那一侧。实测踩到过——转盘在 +160，目标发 -30：
+ *     err = wrap(-30 - 160) = +170  ->  要求继续往正方向转 170°
+ * 可软限位守卫在 |角度| > 限位-余量 时只放行"往回收"的出力，于是把正方向
+ * 出力清零：**误差有 170° 却完全没有出力，转盘永远不动**（用户截图就是这个）。
+ *
+ * 正确做法是选一条"终点落在安全行程内"的路。从 +160 到 -30 应该往下转 190°
+ * （160 -> 0 -> -30），虽然更长，但物理上走得通。
+ *
+ * 判据用终点就够：起点和终点都在 ±limit 内时，单调走过去一定不会越界。
+ * 两条路都不在范围内时保持原来的最短路径（此时怎么走都越界，交给限位守卫处理）。
+ */
+static float ctl_route_error(float target, float cur)
+{
+    float err = yaw_shortest_error(target, yaw_wrap180(cur));
+    float lim = s_limit;        /* 用限位本身：目标允许到 ±limit，不能拿"限位-余量"去筛 */
+    float end = cur + err;
+
+    if ((end > lim) || (end < -lim))
+    {
+        float alt = (err > 0.0f) ? (err - 360.0f) : (err + 360.0f);
+
+        if (((cur + alt) <= lim) && ((cur + alt) >= -lim))
+        {
+            err = alt;
+        }
+    }
+    return err;
+}
+
 /* ==================================================================
  * 初始化与标定
  * ================================================================== */
@@ -712,9 +743,9 @@ void ctl_step(void)
     ctl_fb_update(dt);
     ctl_rate_update(dt);        /* 陀螺反馈要再低通一次，见 ctl_rate_update 注释 */
 
-    /* 最近路径误差：目标 -170°、当前 +170° 时误差是 +20°，不是 -340°。
+    /* 路径误差：优先走"不越出行程"的那条（见 ctl_route_error）。
        IDLE 时也一直算，STAT/INFO 直接能看到离目标还有多少。 */
-    s_error = yaw_shortest_error(s_target, yaw_wrap180(s_fb_deg));
+    s_error = ctl_route_error(s_target, s_fb_deg);
 
     /* ---------------- 闭环 ---------------- */
     if (s_state == CTL_STATE_RUN)
@@ -801,8 +832,10 @@ void ctl_step(void)
             tb_set_cmd(s_out_pm);
         }
 
-        /* 越限：立刻刹车并报故障，防止把排线拧断 */
-        if (util_absf(s_fb_deg) > s_limit)
+        /* 越限：立刻刹车并报故障，防止把排线拧断。
+           阈值给 LIMIT_FAULT_TOL_DEG 的宽容度，否则目标本身设在 ±90°
+           时，正常超调 1~2° 就会被判故障、直接停环。 */
+        if (util_absf(s_fb_deg) > (s_limit + LIMIT_FAULT_TOL_DEG))
         {
             ctl_raise_fault(CTL_FAULT_LIMIT);
             return;
@@ -923,7 +956,7 @@ uint8_t ctl_start(void)
     }
 
     pid_reset(&s_pid);
-    s_error   = yaw_shortest_error(s_target, yaw_wrap180(s_fb_deg));
+    s_error   = ctl_route_error(s_target, s_fb_deg);
     s_out_pm  = 0;
     s_hold_ms = 0U;
     s_state   = CTL_STATE_RUN;

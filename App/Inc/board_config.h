@@ -38,7 +38,7 @@ extern "C" {
 #include "stm32f1xx_hal.h"
 
 /* ================= 固件版本 ================= */
-#define FW_VERSION_STR            "v1.2.8"   /* 改固件时同步改这里，INFO 会打印 */
+#define FW_VERSION_STR            "v1.3.0"   /* 改固件时同步改这里，INFO 会打印 */
 
 /* ================= 时钟 ================= */
 #define BOARD_SYSCLK_HZ           72000000UL
@@ -263,16 +263,18 @@ extern "C" {
 
 /* ================= 软件限位（保护排线） =================
  * 限位作用在"连续累计角"上，不是显示角。
- * 本机实测排线余量约 ±180°（从中间位算），所以默认收到 165°：
- *   165° 是"必须停"的硬线，预留 15° 给惯性、齿隙和控制超调。
- * 想做"±180° 最短路径"演示时，先手动把转盘往负方向转 40° 再 ZERO，
- * 然后临时 LIMIT=200——此时 cont=190 对应的物理位置只有 150°，仍在余量内。
+ * v1.3.0：排线重新走线后安全行程是 ±90°，所以默认收到 90°：
+ *   - 目标角允许到 ±90°（TARGET_LIMIT_MARGIN 取 0，不再扣 5°）；
+ *   - 守卫带宽只留 1.5°，否则 SET=±90 会在 80° 就被掐掉出力、永远差 10°；
+ *   - 越限故障阈值放宽 4°（到 94° 才报），避免 90° 目标正常超调就报警。
+ * 想让行程更大就 LIMIT=<deg>，守卫与故障阈值会跟着一起走。
  */
-#define SOFT_LIMIT_DEG_DEFAULT    165.0f
+#define SOFT_LIMIT_DEG_DEFAULT    90.0f
 #define SOFT_LIMIT_MIN_DEG        30.0f
 #define SOFT_LIMIT_MAX_DEG        300.0f
-#define SOFT_LIMIT_MARGIN_DEG     10.0f   /* 进入这个带宽后只允许往回收 */
-#define TARGET_LIMIT_MARGIN_DEG   5.0f    /* 目标角允许的最大绝对值 = 限位 - 5° */
+#define SOFT_LIMIT_MARGIN_DEG     1.5f    /* 进入这个带宽后只允许往回收 */
+#define TARGET_LIMIT_MARGIN_DEG   0.0f    /* 目标角允许的最大绝对值 = 限位本身 */
+#define LIMIT_FAULT_TOL_DEG       4.0f    /* 超过 限位+它 才报越限故障 */
 
 /* 开环点动超时：上位机/脚本异常退出后，电机最多再转这么久就自动断电。
    正常调参按 200ms 一个脉冲发，每次都会重新计时。 */
