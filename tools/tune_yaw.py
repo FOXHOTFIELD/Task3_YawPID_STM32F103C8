@@ -35,8 +35,16 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
 
 
 class Link(object):
+    """串口链路。
+
+    为什么 timeout=0：pyserial 在 Windows 上把 timeout 映射成「字符间隔超时」，
+    而 100Hz 遥测流每 10ms 就有一个字节、永远凑不出这个间隔，于是 read(N) 会
+    一直阻塞到攒满 N 字节（实测 read(4096) = 2.4s，等于 1700B/s 的流填满 4KiB）。
+    改成非阻塞 + 先看 in_waiting 再读，同一条命令从 4.7s 降到 0.05s 量级。
+    """
+
     def __init__(self, port, baud=DEFAULT_BAUD):
-        self.sp = serial.Serial(port, baud, timeout=0.05)
+        self.sp = serial.Serial(port, baud, timeout=0)
         time.sleep(0.3)
         self.sp.reset_input_buffer()
         self.sp.reset_output_buffer()
@@ -52,22 +60,50 @@ class Link(object):
         self.sp.flush()
 
     def drain(self, sec=0.3):
+        """收集 sec 秒内的所有整行（非阻塞：先看 in_waiting 再读多少）"""
         out = []
-        t_end = time.time() + sec
+        t_end = time.perf_counter() + sec
         pending = b""
-        while time.time() < t_end:
-            pending += self.sp.read(4096)
-            while b"\n" in pending:
-                line, pending = pending.split(b"\n", 1)
-                out.append(line.decode("utf-8", "replace").strip())
+        while time.perf_counter() < t_end:
+            n = self.sp.in_waiting
+            if n:
+                pending += self.sp.read(n)
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    out.append(line.decode("utf-8", "replace").strip())
+            else:
+                time.sleep(0.001)
         return out
 
-    def command(self, cmd, wait=0.5):
-        """发一条命令并收集回显（丢掉数据流行）"""
-        self.drain(0.05)
+    def command(self, cmd, wait=0.5, quiet=0.06):
+        """发一条命令并收集回显（丢掉数据流行）
+
+        wait 是硬上限；实际只要「收到回显行后 quiet 秒内没有新数据」就提前返回。
+        修复读取后回包延迟只有几毫秒，没必要像旧实现那样每条命令盲等 0.3~0.5s。
+        """
+        self.drain(0.02)
         self.send(cmd)
-        lines = self.drain(wait)
-        return [ln for ln in lines if not ln.startswith("yaw:")]
+        out = []
+        pending = b""
+        t_end = time.perf_counter() + wait
+        t_reply = None
+        while time.perf_counter() < t_end:
+            n = self.sp.in_waiting
+            if n:
+                pending += self.sp.read(n)
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    s = line.decode("utf-8", "replace").strip()
+                    if not s:
+                        continue
+                    out.append(s)
+                    if not s.startswith("yaw:"):
+                        t_reply = time.perf_counter()
+            else:
+                if t_reply is not None and (time.perf_counter() - t_reply) >= quiet:
+                    break
+                time.sleep(0.001)
+        return [ln for ln in out if not ln.startswith("yaw:")]
 
     def set_stream(self, on=True):
         self.command("STREAM=%s" % ("ON" if on else "OFF"), 0.4)
@@ -75,28 +111,38 @@ class Link(object):
         self.sp.reset_input_buffer()
 
     def record(self, sec, settle=0.05):
-        """采集 sec 秒的数据流，返回 [(t, target, yaw)]"""
-        t0 = time.time()
+        """采集 sec 秒的数据流，返回 [(t, target, yaw)]
+
+        t 用 perf_counter 逐行打戳；必须非阻塞读取，否则一批数据共用一个时间戳，
+        rise90/settle 这类时间指标会全部失真（旧实现实测 909 行只有 14 个时间戳）。
+        settle 参数仅为兼容旧调用保留。
+        """
+        t0 = time.perf_counter()
         data = []
         pending = b""
-        while time.time() - t0 < sec:
-            pending += self.sp.read(8192)
-            while b"\n" in pending:
-                line, pending = pending.split(b"\n", 1)
-                s = line.decode("utf-8", "replace").strip()
-                if not s.startswith("yaw:"):
-                    continue
-                body = s[4:]
-                parts = body.split(",")
-                if len(parts) < 2:
-                    continue
-                try:
-                    tg = float(parts[0])
-                    yw = float(parts[1])
-                except ValueError:
-                    continue
-                data.append((time.time() - t0, tg, yw))
-            if sec - (time.time() - t0) < settle:
+        while True:
+            now = time.perf_counter() - t0
+            if now >= sec:
+                break
+            n = self.sp.in_waiting
+            if n:
+                pending += self.sp.read(n)
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    s = line.decode("utf-8", "replace").strip()
+                    if not s.startswith("yaw:"):
+                        continue
+                    body = s[4:]
+                    parts = body.split(",")
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        tg = float(parts[0])
+                        yw = float(parts[1])
+                    except ValueError:
+                        continue
+                    data.append((time.perf_counter() - t0, tg, yw))
+            else:
                 time.sleep(0.001)
         return data
 
@@ -149,6 +195,17 @@ def metrics(data, target, tol=1.0):
 def dump_csv(name, data):
     os.makedirs(LOG_DIR, exist_ok=True)
     path = os.path.normpath(os.path.join(LOG_DIR, name))
+    # 时序自检：一批数据共用一个时间戳的曲线，rise90/settle 是不可用的，
+    # 这里直接喊出来，别让它静默写进 docs\tuning 被当成结论。
+    if len(data) >= 20:
+        ts = [row[0] for row in data]
+        uniq = len(set(ts))
+        dts = sorted(ts[i] - ts[i - 1] for i in range(1, len(ts)))
+        med = dts[len(dts) // 2]
+        if uniq < 0.9 * len(ts) or med <= 0.0:
+            print("  [WARN] timestamp quantization: %d samples / %d distinct, "
+                  "median dt=%.4fs -- time-domain metrics are invalid"
+                  % (len(ts), uniq, med))
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["t_s", "target_deg", "yaw_deg"])
